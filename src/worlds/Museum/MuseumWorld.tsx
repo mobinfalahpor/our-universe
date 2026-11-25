@@ -14,31 +14,50 @@ import {
   X,
 } from 'lucide-react';
 import { SceneCanvas } from '../../components/SceneCanvas';
-import { createMarbleTileTexture } from '../../systems/proceduralTextures';
 import { audioEngine } from '../../systems/audioEngine';
 import { toPersianDigits } from '../../core/persianUtils';
+import { useUniverseStore } from '../../core/store';
+import { getGraphicsProfile } from '../../core/graphicsProfile';
 import {
   buildMuseumCollisionWorld,
+  getHall4Bounds,
+  getHallAtPosition,
   movePlayerWithCollision,
-  MUSEUM_HALL2_POS,
+  MUSEUM_HALL_SPAWNS,
   MUSEUM_START_POS,
   PLAYER_EYE_HEIGHT,
   resolveCapsulePosition2D,
   type MuseumCollisionWorld,
+  type MuseumHallId,
 } from './museumPhysics';
+import {
+  createBeauxArtsMarbleTextures,
+  createBoiserieWallTexture,
+  createCeilingFrescoTexture,
+  createContactShadowTexture,
+  createDamaskWallTexture,
+  createHerringboneParquetTextures,
+  createPalaceClockTexture,
+} from './museumTextures';
+import {
+  AmbientVisitorNPC,
+  AntiqueMuseumBench,
+  ArchedBeauxArtsWindow,
+  BrassWallSconce,
+  ClassicalAmphoraUrn,
+  ClassicalSculptureFull,
+  CorinthianColumn,
+  CrystalChandelier,
+  DecorativeConsoleTable,
+  MarbleBustExhibit,
+  MonumentalOakDoors,
+  OrnatePhotoFrame3D,
+  type FrameStyle,
+  type PhotoSlot,
+} from './museumModels';
+import { museumAcoustics } from './museumAcoustics';
 
-type GalleryMood = 'gallery' | 'golden' | 'midnight';
-type FrameStyle = 'classic_gold' | 'warm_wood' | 'minimal_modern' | 'ornate_artistic';
-
-interface PhotoSlot {
-  index: number;
-  src: string;
-  position: [number, number, number];
-  rotationY: number;
-  normal: [number, number, number];
-  style: FrameStyle;
-  baseSize: number;
-}
+type GalleryMood = 'daylight' | 'golden' | 'evening';
 
 interface MovementSettings {
   walkSpeed: number;
@@ -48,9 +67,17 @@ interface MovementSettings {
 }
 
 interface TeleportRequest {
-  target: 'start' | 'hall1' | 'hall2';
+  target: MuseumHallId;
   seq: number;
 }
+
+const HALL_TABS: { id: MuseumHallId; label: string }[] = [
+  { id: 'hall1', label: 'تالار بزرگ' },
+  { id: 'hall2', label: 'تالار نقاشی' },
+  { id: 'hall3', label: 'تالار مجسمه' },
+  { id: 'hall4', label: 'گالری نورگیر' },
+  { id: 'hall5', label: 'تالار منتخب' },
+];
 
 function getPhotoUrl(filename: string): string {
   const base = import.meta.env.BASE_URL || './';
@@ -59,99 +86,82 @@ function getPhotoUrl(filename: string): string {
 }
 
 function buildGalleryLayout(files: string[]): { slots: PhotoSlot[]; hall2DepthExtra: number } {
-  const styles: FrameStyle[] = ['classic_gold', 'warm_wood', 'ornate_artistic', 'minimal_modern'];
-  const basePresets: Omit<PhotoSlot, 'index' | 'src'>[] = [
-    // Hall 1 (Golden Rotunda, z: 3 to -7)
-    { position: [-6.75, 2.35, 1.4], rotationY: Math.PI / 2, normal: [1, 0, 0], style: 'classic_gold', baseSize: 2.05 },
-    { position: [-6.75, 2.45, -3.2], rotationY: Math.PI / 2, normal: [1, 0, 0], style: 'warm_wood', baseSize: 1.85 },
-    { position: [6.75, 2.35, 1.4], rotationY: -Math.PI / 2, normal: [-1, 0, 0], style: 'ornate_artistic', baseSize: 2.05 },
-    { position: [6.75, 2.45, -3.2], rotationY: -Math.PI / 2, normal: [-1, 0, 0], style: 'minimal_modern', baseSize: 1.85 },
-    // Hall 1 flank walls near archway
-    { position: [-4.2, 2.4, -7.25], rotationY: 0, normal: [0, 0, 1], style: 'ornate_artistic', baseSize: 1.75 },
-    { position: [4.2, 2.4, -7.25], rotationY: 0, normal: [0, 0, 1], style: 'classic_gold', baseSize: 1.75 },
-    // Hall 2 (Moonlight Wing, z: -11 to -22)
-    { position: [-6.75, 2.35, -13.2], rotationY: Math.PI / 2, normal: [1, 0, 0], style: 'minimal_modern', baseSize: 2.0 },
-    { position: [-6.75, 2.4, -17.8], rotationY: Math.PI / 2, normal: [1, 0, 0], style: 'classic_gold', baseSize: 1.95 },
-    { position: [6.75, 2.35, -13.2], rotationY: -Math.PI / 2, normal: [-1, 0, 0], style: 'warm_wood', baseSize: 2.0 },
-    { position: [6.75, 2.4, -17.8], rotationY: -Math.PI / 2, normal: [-1, 0, 0], style: 'ornate_artistic', baseSize: 1.95 },
-    // Hall 2 feature end wall
-    { position: [-2.1, 2.5, -21.75], rotationY: 0, normal: [0, 0, 1], style: 'classic_gold', baseSize: 2.1 },
-    { position: [2.1, 2.5, -21.75], rotationY: 0, normal: [0, 0, 1], style: 'warm_wood', baseSize: 2.1 },
+  const styles: FrameStyle[] = ['ornate_salon', 'classic_gold', 'walnut_gilt', 'empire_ebony'];
+  const extraBays = files.length > 18 ? Math.ceil((files.length - 18) / 2) : 0;
+  const hall2DepthExtra = extraBays * 4.8;
+  const { hall4SouthZ } = getHall4Bounds(hall2DepthExtra);
+
+  // Curated Salon & Beaux-Arts slots blending grand hero frames and intimate salon groupings
+  const presets: Omit<PhotoSlot, 'index' | 'src'>[] = [
+    // 0–3: Anchor hero works across Hall 2 (Salon Carré), Hall 4 (Skylight), & Hall 5 (Intimate Cabinet)
+    { hall: 'hall2', position: [-8.48, 2.85, -13.6], rotationY: Math.PI / 2, normal: [1, 0, 0], style: 'ornate_salon', baseSize: 2.55 },
+    { hall: 'hall2', position: [8.48, 2.85, -13.6], rotationY: -Math.PI / 2, normal: [-1, 0, 0], style: 'classic_gold', baseSize: 2.55 },
+    { hall: 'hall4', position: [-8.48, 2.75, hall4SouthZ - 6.8], rotationY: Math.PI / 2, normal: [1, 0, 0], style: 'walnut_gilt', baseSize: 2.45 },
+    { hall: 'hall5', position: [-18.48, 2.6, -2.0], rotationY: Math.PI / 2, normal: [1, 0, 0], style: 'ornate_salon', baseSize: 2.5 },
+
+    // 4–7: Salon Carré secondary & staggered smaller frames
+    { hall: 'hall2', position: [-8.48, 2.85, -19.6], rotationY: Math.PI / 2, normal: [1, 0, 0], style: 'classic_gold', baseSize: 2.3 },
+    { hall: 'hall2', position: [8.48, 2.85, -19.6], rotationY: -Math.PI / 2, normal: [-1, 0, 0], style: 'ornate_salon', baseSize: 2.3 },
+    { hall: 'hall4', position: [8.48, 2.75, hall4SouthZ - 6.8], rotationY: -Math.PI / 2, normal: [-1, 0, 0], style: 'classic_gold', baseSize: 2.45 },
+    { hall: 'hall1', position: [-5.4, 2.85, -8.23], rotationY: 0, normal: [0, 0, 1], style: 'ornate_salon', baseSize: 2.2 },
+
+    // 8–11: Intimate Cabinet flanking works + Grande Galerie East pier
+    { hall: 'hall1', position: [5.4, 2.85, -8.23], rotationY: 0, normal: [0, 0, 1], style: 'classic_gold', baseSize: 2.2 },
+    { hall: 'hall5', position: [-15.8, 2.5, -6.48], rotationY: 0, normal: [0, 0, 1], style: 'walnut_gilt', baseSize: 1.65 },
+    { hall: 'hall5', position: [-11.2, 2.5, -6.48], rotationY: 0, normal: [0, 0, 1], style: 'classic_gold', baseSize: 1.65 },
+    { hall: 'hall5', position: [-18.48, 2.5, 0.7], rotationY: Math.PI / 2, normal: [1, 0, 0], style: 'empire_ebony', baseSize: 1.55 },
+
+    // 12–17: Salon Carré tiered upper/lower smaller cabinet frames & Orsay wing additions
+    { hall: 'hall5', position: [-18.48, 2.5, -4.7], rotationY: Math.PI / 2, normal: [1, 0, 0], style: 'empire_ebony', baseSize: 1.55 },
+    { hall: 'hall2', position: [-8.48, 2.25, -11.4], rotationY: Math.PI / 2, normal: [1, 0, 0], style: 'walnut_gilt', baseSize: 1.45 },
+    { hall: 'hall2', position: [8.48, 2.25, -11.4], rotationY: -Math.PI / 2, normal: [-1, 0, 0], style: 'walnut_gilt', baseSize: 1.45 },
+    { hall: 'hall2', position: [-8.48, 2.25, -21.6], rotationY: Math.PI / 2, normal: [1, 0, 0], style: 'empire_ebony', baseSize: 1.45 },
+    { hall: 'hall2', position: [8.48, 2.25, -21.6], rotationY: -Math.PI / 2, normal: [-1, 0, 0], style: 'empire_ebony', baseSize: 1.45 },
+    { hall: 'hall4', position: [-5.4, 2.65, hall4SouthZ + 0.25], rotationY: Math.PI, normal: [0, 0, -1], style: 'classic_gold', baseSize: 1.95 },
   ];
 
   const slots: PhotoSlot[] = [];
-  let extraBays = 0;
-
-  if (files.length <= basePresets.length) {
-    files.forEach((f, i) => {
-      slots.push({
-        ...basePresets[i],
-        index: i,
-        src: getPhotoUrl(f),
-      });
+  const fixedCount = Math.min(files.length, presets.length);
+  for (let i = 0; i < fixedCount; i++) {
+    slots.push({
+      ...presets[i],
+      index: i,
+      src: getPhotoUrl(files[i]),
     });
-  } else {
-    const fixedSide = basePresets.slice(0, 10);
-    fixedSide.forEach((preset, i) => {
-      slots.push({ ...preset, index: i, src: getPhotoUrl(files[i]) });
-    });
-
-    let cursor = 10;
-    let bayZ = -22.4;
-    while (cursor < files.length - 2) {
-      extraBays += 1;
-      slots.push({
-        index: cursor,
-        src: getPhotoUrl(files[cursor]),
-        position: [-6.75, 2.38, bayZ],
-        rotationY: Math.PI / 2,
-        normal: [1, 0, 0],
-        style: styles[cursor % styles.length],
-        baseSize: 1.95,
-      });
-      cursor++;
-      if (cursor < files.length - 2) {
-        slots.push({
-          index: cursor,
-          src: getPhotoUrl(files[cursor]),
-          position: [6.75, 2.38, bayZ],
-          rotationY: -Math.PI / 2,
-          normal: [-1, 0, 0],
-          style: styles[cursor % styles.length],
-          baseSize: 1.95,
-        });
-        cursor++;
-      }
-      bayZ -= 4.6;
-    }
-
-    const endZ = -21.75 - extraBays * 4.6;
-    if (cursor < files.length) {
-      slots.push({
-        index: cursor,
-        src: getPhotoUrl(files[cursor]),
-        position: cursor + 1 < files.length ? [-2.1, 2.5, endZ] : [0, 2.5, endZ],
-        rotationY: 0,
-        normal: [0, 0, 1],
-        style: 'classic_gold',
-        baseSize: 2.15,
-      });
-      cursor++;
-    }
-    if (cursor < files.length) {
-      slots.push({
-        index: cursor,
-        src: getPhotoUrl(files[cursor]),
-        position: [2.1, 2.5, endZ],
-        rotationY: 0,
-        normal: [0, 0, 1],
-        style: 'ornate_artistic',
-        baseSize: 2.15,
-      });
-    }
   }
 
-  return { slots, hall2DepthExtra: extraBays * 4.6 };
+  // Dynamic Salon Carré extension bays if user uploads > 18 photos
+  let cursor = fixedCount;
+  let bayZ = -25.6;
+  while (cursor < files.length) {
+    slots.push({
+      index: cursor,
+      src: getPhotoUrl(files[cursor]),
+      hall: 'hall2',
+      position: [-8.48, 2.75, bayZ],
+      rotationY: Math.PI / 2,
+      normal: [1, 0, 0],
+      style: styles[cursor % styles.length],
+      baseSize: 2.3,
+    });
+    cursor++;
+    if (cursor < files.length) {
+      slots.push({
+        index: cursor,
+        src: getPhotoUrl(files[cursor]),
+        hall: 'hall2',
+        position: [8.48, 2.75, bayZ],
+        rotationY: -Math.PI / 2,
+        normal: [-1, 0, 0],
+        style: styles[cursor % styles.length],
+        baseSize: 2.3,
+      });
+      cursor++;
+    }
+    bayZ -= 4.8;
+  }
+
+  return { slots, hall2DepthExtra };
 }
 
 function wrapAngleDelta(current: number, target: number): number {
@@ -170,243 +180,32 @@ function detectTouchCapable(): boolean {
   );
 }
 
-function PhotoFrame3D({
-  slot,
-  active,
-  onSelect,
-  suppressClickUntilRef,
-}: {
-  slot: PhotoSlot;
-  active: boolean;
-  onSelect: (slot: PhotoSlot) => void;
-  suppressClickUntilRef: React.MutableRefObject<number>;
-}) {
-  const [texture, setTexture] = useState<THREE.Texture | null>(null);
-  const [aspect, setAspect] = useState(4 / 3);
-  const [hovered, setHovered] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    const loader = new THREE.TextureLoader();
-    loader.load(
-      slot.src,
-      (loaded) => {
-        if (cancelled) {
-          loaded.dispose();
-          return;
-        }
-        loaded.colorSpace = THREE.SRGBColorSpace;
-        loaded.minFilter = THREE.LinearFilter;
-        const img = loaded.image as { width?: number; height?: number } | undefined;
-        if (img?.width && img?.height) {
-          setAspect(img.width / img.height);
-        }
-        setTexture(loaded);
-      },
-      undefined,
-      () => {
-        // Ignore broken image gracefully without displaying filenames
-      }
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [slot.src]);
-
-  useEffect(() => {
-    return () => {
-      if (texture) texture.dispose();
-    };
-  }, [texture]);
-
-  const maxSpan = slot.baseSize;
-  const artW = aspect >= 1 ? maxSpan : maxSpan * aspect;
-  const artH = aspect >= 1 ? maxSpan / aspect : maxSpan;
-  const matPad = slot.style === 'minimal_modern' ? 0.1 : 0.16;
-  const borderW = slot.style === 'ornate_artistic' ? 0.14 : slot.style === 'minimal_modern' ? 0.06 : 0.11;
-
-  const totalW = artW + matPad * 2 + borderW * 2;
-  const totalH = artH + matPad * 2 + borderW * 2;
-
-  const frameColor =
-    slot.style === 'classic_gold'
-      ? '#D6B875'
-      : slot.style === 'warm_wood'
-        ? '#5b3c2b'
-        : slot.style === 'ornate_artistic'
-          ? '#D9A9C5'
-          : '#1e1d38';
-  const frameMetal = slot.style === 'classic_gold' || slot.style === 'ornate_artistic' ? 0.85 : 0.15;
-  const frameRough = slot.style === 'classic_gold' ? 0.22 : slot.style === 'warm_wood' ? 0.55 : 0.35;
-
-  return (
-    <group
-      position={slot.position}
-      rotation={[0, slot.rotationY, 0]}
-      onClick={(e) => {
-        e.stopPropagation();
-        if (performance.now() < suppressClickUntilRef.current) return;
-        audioEngine.playSfx('sparkle');
-        onSelect(slot);
-      }}
-      onPointerOver={(e) => {
-        e.stopPropagation();
-        setHovered(true);
-        if (!document.pointerLockElement) {
-          document.body.style.cursor = 'pointer';
-        }
-      }}
-      onPointerOut={() => {
-        setHovered(false);
-        document.body.style.cursor = 'default';
-      }}
-    >
-      <pointLight
-        position={[0, totalH * 0.68, 0.85]}
-        color={active || hovered ? '#ffe6b3' : '#f3dec3'}
-        intensity={active ? 2.4 : hovered ? 1.8 : 1.15}
-        distance={5.5}
-      />
-
-      {/* Overhead Brass Gallery Picture Lamp */}
-      <group position={[0, totalH * 0.5 + 0.22, 0.16]}>
-        <mesh position={[0, 0, -0.08]}>
-          <boxGeometry args={[0.08, 0.06, 0.22]} />
-          <meshStandardMaterial color="#D6B875" metalness={0.85} roughness={0.22} />
-        </mesh>
-        <mesh rotation={[0, 0, Math.PI / 2]}>
-          <cylinderGeometry args={[0.038, 0.038, Math.min(0.85, totalW * 0.48), 12]} />
-          <meshStandardMaterial
-            color="#D6B875"
-            emissive="#ffe29a"
-            emissiveIntensity={active || hovered ? 0.8 : 0.45}
-            metalness={0.82}
-            roughness={0.22}
-          />
-        </mesh>
-      </group>
-
-      {/* Frame Backing & Outer Molding */}
-      <mesh position={[0, 0, 0]} castShadow>
-        <boxGeometry args={[totalW, totalH, 0.09]} />
-        <meshStandardMaterial color={frameColor} metalness={frameMetal} roughness={frameRough} />
-      </mesh>
-
-      {slot.style === 'ornate_artistic' &&
-        [
-          [-totalW * 0.46, totalH * 0.46],
-          [totalW * 0.46, totalH * 0.46],
-          [-totalW * 0.46, -totalH * 0.46],
-          [totalW * 0.46, -totalH * 0.46],
-        ].map(([cx, cy], idx) => (
-          <mesh key={idx} position={[cx, cy, 0.055]}>
-            <sphereGeometry args={[0.065, 10, 10]} />
-            <meshStandardMaterial color="#D6B875" metalness={0.9} roughness={0.18} />
-          </mesh>
-        ))}
-
-      {(slot.style === 'warm_wood' || slot.style === 'minimal_modern') && (
-        <mesh position={[0, 0, 0.048]}>
-          <boxGeometry args={[artW + matPad * 2 + 0.04, artH + matPad * 2 + 0.04, 0.012]} />
-          <meshStandardMaterial color="#D6B875" metalness={0.85} roughness={0.24} />
-        </mesh>
-      )}
-
-      {/* Museum Cream Passe-Partout Mat */}
-      <mesh position={[0, 0, 0.055]}>
-        <boxGeometry args={[artW + matPad * 2, artH + matPad * 2, 0.015]} />
-        <meshStandardMaterial color="#f5ede4" roughness={0.88} />
-      </mesh>
-
-      {/* Actual Photo Surface (zero text metadata anywhere) */}
-      <mesh position={[0, 0, 0.068]}>
-        <planeGeometry args={[artW, artH]} />
-        {texture ? (
-          <meshBasicMaterial map={texture} toneMapped={false} />
-        ) : (
-          <meshStandardMaterial color="#2a284a" roughness={0.7} />
-        )}
-      </mesh>
-    </group>
-  );
-}
-
-function CentralSculpture({ position, variant }: { position: [number, number, number]; variant: 'heart' | 'nebula' }) {
-  const ref = useRef<THREE.Group>(null);
-  useFrame(({ clock }) => {
-    const t = clock.getElapsedTime();
-    if (!ref.current) return;
-    ref.current.rotation.y = t * 0.42;
-    if (variant === 'heart') {
-      ref.current.position.y = 1.65 + Math.sin(t * 1.4) * 0.08;
-    }
-  });
-
-  return (
-    <group position={position}>
-      <mesh position={[0, 0.48, 0]} castShadow receiveShadow>
-        <cylinderGeometry args={[0.58, 0.7, 0.96, 20]} />
-        <meshStandardMaterial color="#252444" roughness={0.35} metalness={0.15} />
-      </mesh>
-      <mesh position={[0, 0.98, 0]}>
-        <cylinderGeometry args={[0.64, 0.64, 0.07, 20]} />
-        <meshStandardMaterial color="#D6B875" metalness={0.85} roughness={0.22} />
-      </mesh>
-      <group ref={ref} position={[0, 1.65, 0]}>
-        {variant === 'heart' ? (
-          <>
-            <mesh castShadow>
-              <octahedronGeometry args={[0.48, 1]} />
-              <meshPhysicalMaterial
-                color="#D9A9C5"
-                emissive="#7771A8"
-                emissiveIntensity={0.35}
-                roughness={0.08}
-                clearcoat={1}
-              />
-            </mesh>
-            <mesh rotation={[Math.PI / 3, 0, 0]}>
-              <torusGeometry args={[0.74, 0.022, 10, 36]} />
-              <meshStandardMaterial color="#D6B875" metalness={0.9} roughness={0.16} />
-            </mesh>
-          </>
-        ) : (
-          <>
-            <mesh>
-              <sphereGeometry args={[0.45, 22, 22]} />
-              <meshPhysicalMaterial color="#7771A8" transparent opacity={0.42} roughness={0.06} clearcoat={1} />
-            </mesh>
-            <mesh>
-              <icosahedronGeometry args={[0.25, 1]} />
-              <meshStandardMaterial color="#D9A9C5" emissive="#D6B875" emissiveIntensity={1.2} wireframe />
-            </mesh>
-          </>
-        )}
-      </group>
-    </group>
-  );
-}
-
 /**
- * کنترلر اول‌شخص حرفه‌ای موزه با کپسول برخوردسنجی، Pointer Lock، کشیدن ماوس و کنترل لمسی
+ * کنترلر اول‌شخص موزه با برخوردسنجی دقیق ۵ تالار، حرکت آرام دوربین هنگام قدم زدن و صدای قدم متناسب با جنس کف
  */
 function FirstPersonMuseumController({
   collisionWorld,
+  hall2DepthExtra,
   activeSlot,
   teleportRequest,
   settings,
+  reducedMotion,
   joystickRef,
   suppressClickUntilRef,
   onPointerLockChange,
+  onHallChange,
   onCanvasElement,
 }: {
   collisionWorld: MuseumCollisionWorld;
+  hall2DepthExtra: number;
   activeSlot: PhotoSlot | null;
   teleportRequest: TeleportRequest;
   settings: MovementSettings;
+  reducedMotion: boolean;
   joystickRef: React.MutableRefObject<{ x: number; y: number }>;
   suppressClickUntilRef: React.MutableRefObject<number>;
   onPointerLockChange: (locked: boolean) => void;
+  onHallChange: (hall: MuseumHallId) => void;
   onCanvasElement: (el: HTMLCanvasElement | null) => void;
 }) {
   const { camera, gl } = useThree();
@@ -437,10 +236,14 @@ function FirstPersonMuseumController({
   const keysRef = useRef<Record<string, boolean>>({});
   const settingsRef = useRef(settings);
   const activeSlotRef = useRef(activeSlot);
+  const currentHallRef = useRef<MuseumHallId>('hall1');
+  const strideDistRef = useRef(0);
+  const bobPhaseRef = useRef(0);
+  const bobOffsetRef = useRef(0);
+
   settingsRef.current = settings;
   activeSlotRef.current = activeSlot;
 
-  // Register canvas element with parent so UI buttons can requestPointerLock
   useEffect(() => {
     const dom = gl.domElement;
     onCanvasElement(dom);
@@ -457,30 +260,29 @@ function FirstPersonMuseumController({
     };
   }, [gl, onCanvasElement]);
 
-  // Initial camera orientation
   useEffect(() => {
     camera.rotation.order = 'YXZ';
     camera.position.set(MUSEUM_START_POS.x, PLAYER_EYE_HEIGHT, MUSEUM_START_POS.z);
     camera.rotation.set(MUSEUM_START_POS.pitch, MUSEUM_START_POS.yaw, 0);
   }, [camera]);
 
-  // Handle Hall Jumps & Reset Camera teleports safely via collision resolution
+  // Hall teleports / resets validated via collision world
   useEffect(() => {
     if (teleportRequest.seq === 0) return;
-    const baseTarget =
-      teleportRequest.target === 'hall2' ? MUSEUM_HALL2_POS : MUSEUM_START_POS;
-    const safe = resolveCapsulePosition2D(baseTarget.x, baseTarget.z, collisionWorld);
+    const spawn = MUSEUM_HALL_SPAWNS[teleportRequest.target] || MUSEUM_START_POS;
+    const safe = resolveCapsulePosition2D(spawn.x, spawn.z, collisionWorld);
     physicsRef.current = {
       x: safe.x,
       z: safe.z,
-      yaw: baseTarget.yaw,
-      pitch: baseTarget.pitch,
+      yaw: spawn.yaw,
+      pitch: spawn.pitch,
     };
     renderRef.current = { ...physicsRef.current };
     isReturningRef.current = false;
+    bobOffsetRef.current = 0;
   }, [teleportRequest, collisionWorld]);
 
-  // Handle opening / closing artwork lightbox cleanly
+  // Photo inspection glide & safe restore
   useEffect(() => {
     if (activeSlot && !prevSlotRef.current) {
       savedBeforeInspectRef.current = { ...physicsRef.current };
@@ -494,23 +296,45 @@ function FirstPersonMuseumController({
         }
       }
       document.body.style.cursor = 'default';
+    } else if (activeSlot && prevSlotRef.current && activeSlot.index !== prevSlotRef.current.index) {
+      // Switching directly between paintings in Lightbox: snap renderRef immediately so camera never passes through walls
+      const [px, py, pz] = activeSlot.position;
+      const [nx, , nz] = activeSlot.normal;
+      const safeGoal = resolveCapsulePosition2D(px + nx * 2.55, pz + nz * 2.55, collisionWorld);
+      const dist = Math.max(0.8, Math.hypot(px - safeGoal.x, pz - safeGoal.z));
+      renderRef.current = {
+        x: safeGoal.x,
+        z: safeGoal.z,
+        yaw: Math.atan2(nx, nz),
+        pitch: THREE.MathUtils.clamp(Math.atan2(py - PLAYER_EYE_HEIGHT, dist), -0.75, 0.75),
+      };
     } else if (!activeSlot && prevSlotRef.current) {
       const safeRestore = resolveCapsulePosition2D(
         savedBeforeInspectRef.current.x,
         savedBeforeInspectRef.current.z,
         collisionWorld
       );
+      const jumpDist = Math.hypot(
+        renderRef.current.x - safeRestore.x,
+        renderRef.current.z - safeRestore.z
+      );
       physicsRef.current = {
         ...savedBeforeInspectRef.current,
         x: safeRestore.x,
         z: safeRestore.z,
       };
-      isReturningRef.current = true;
+      if (jumpDist > 12) {
+        // Snap cleanly if returning from another distant wing visited via Next/Prev
+        renderRef.current = { ...physicsRef.current };
+        isReturningRef.current = false;
+      } else {
+        isReturningRef.current = true;
+      }
     }
     prevSlotRef.current = activeSlot;
   }, [activeSlot, collisionWorld]);
 
-  // Keyboard listeners
+  // Keyboard inputs
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (activeSlotRef.current) return;
@@ -537,7 +361,7 @@ function FirstPersonMuseumController({
     };
   }, []);
 
-  // Pointer Lock + Fallback Mouse Drag + Right-Side Touch Look
+  // Pointer Lock + Mouse Drag + Right-Side Touch Drag
   useEffect(() => {
     const dom = gl.domElement;
     let dragPointerId: number | null = null;
@@ -550,8 +374,8 @@ function FirstPersonMuseumController({
       physicsRef.current.yaw -= dx * sens;
       physicsRef.current.pitch = THREE.MathUtils.clamp(
         physicsRef.current.pitch - dy * sens * 0.9,
-        -1.22,
-        1.22
+        -1.2,
+        1.2
       );
       isReturningRef.current = false;
     };
@@ -572,7 +396,6 @@ function FirstPersonMuseumController({
       if (activeSlotRef.current || document.pointerLockElement === dom) return;
       if (e.pointerType === 'touch') {
         if (!settingsRef.current.touchControls) return;
-        // Right side of viewport reserved for touch look so bottom-left joystick stays isolated
         if (e.clientX < window.innerWidth * 0.34) return;
       }
       dragPointerId = e.pointerId;
@@ -625,12 +448,9 @@ function FirstPersonMuseumController({
     const curSettings = settingsRef.current;
 
     if (activeSlot) {
-      // Glide safely inside walkable space in front of the selected artwork
       const [px, py, pz] = activeSlot.position;
       const [nx, , nz] = activeSlot.normal;
-      const rawGoalX = px + nx * 2.45;
-      const rawGoalZ = pz + nz * 2.45;
-      const safeGoal = resolveCapsulePosition2D(rawGoalX, rawGoalZ, collisionWorld);
+      const safeGoal = resolveCapsulePosition2D(px + nx * 2.55, pz + nz * 2.55, collisionWorld);
       const distToFrame = Math.max(0.8, Math.hypot(px - safeGoal.x, pz - safeGoal.z));
       const targetYaw = Math.atan2(nx, nz);
       const targetPitch = THREE.MathUtils.clamp(
@@ -639,19 +459,27 @@ function FirstPersonMuseumController({
         0.75
       );
 
-      renderRef.current.x = THREE.MathUtils.damp(renderRef.current.x, safeGoal.x, 7.5, dt);
-      renderRef.current.z = THREE.MathUtils.damp(renderRef.current.z, safeGoal.z, 7.5, dt);
-      renderRef.current.yaw +=
-        wrapAngleDelta(renderRef.current.yaw, targetYaw) * (1 - Math.exp(-7.5 * dt));
-      renderRef.current.pitch = THREE.MathUtils.damp(renderRef.current.pitch, targetPitch, 7.5, dt);
+      // Only glide smoothly if within same visual corridor; snap if across distant wings
+      if (Math.hypot(renderRef.current.x - safeGoal.x, renderRef.current.z - safeGoal.z) > 12) {
+        renderRef.current.x = safeGoal.x;
+        renderRef.current.z = safeGoal.z;
+        renderRef.current.yaw = targetYaw;
+        renderRef.current.pitch = targetPitch;
+      } else {
+        renderRef.current.x = THREE.MathUtils.damp(renderRef.current.x, safeGoal.x, 7.5, dt);
+        renderRef.current.z = THREE.MathUtils.damp(renderRef.current.z, safeGoal.z, 7.5, dt);
+        renderRef.current.yaw +=
+          wrapAngleDelta(renderRef.current.yaw, targetYaw) * (1 - Math.exp(-7.5 * dt));
+        renderRef.current.pitch = THREE.MathUtils.damp(renderRef.current.pitch, targetPitch, 7.5, dt);
+      }
+      bobOffsetRef.current = THREE.MathUtils.damp(bobOffsetRef.current, 0, 12, dt);
     } else {
       const k = keysRef.current;
       const joy = curSettings.touchControls ? joystickRef.current : { x: 0, y: 0 };
 
-      // Keyboard yaw turning with Left/Right arrows
       const arrowTurn = (k.ArrowLeft ? 1 : 0) - (k.ArrowRight ? 1 : 0);
       if (arrowTurn !== 0) {
-        physicsRef.current.yaw += arrowTurn * 1.7 * curSettings.lookSensitivity * dt;
+        physicsRef.current.yaw += arrowTurn * 1.75 * curSettings.lookSensitivity * dt;
         isReturningRef.current = false;
       }
 
@@ -666,9 +494,11 @@ function FirstPersonMuseumController({
         localStrafe /= mag;
       }
 
+      let movedStep = 0;
+
       if (mag > 0.001) {
         isReturningRef.current = false;
-        const sprintMul = k.ShiftLeft || k.ShiftRight ? 1.58 : 1;
+        const sprintMul = k.ShiftLeft || k.ShiftRight ? 1.56 : 1;
         const speed = curSettings.walkSpeed * curSettings.moveSensitivity * sprintMul;
         const yaw = physicsRef.current.yaw;
         const fx = -Math.sin(yaw);
@@ -679,17 +509,13 @@ function FirstPersonMuseumController({
         const deltaX = (fx * localFwd + rx * localStrafe) * speed * dt;
         const deltaZ = (fz * localFwd + rz * localStrafe) * speed * dt;
 
-        const moved = movePlayerWithCollision(
-          physicsRef.current.x,
-          physicsRef.current.z,
-          deltaX,
-          deltaZ,
-          collisionWorld
-        );
+        const prevX = physicsRef.current.x;
+        const prevZ = physicsRef.current.z;
+        const moved = movePlayerWithCollision(prevX, prevZ, deltaX, deltaZ, collisionWorld);
         physicsRef.current.x = moved.x;
         physicsRef.current.z = moved.z;
+        movedStep = Math.hypot(moved.x - prevX, moved.z - prevZ);
       } else {
-        // Ensure standing point remains strictly collision-safe
         const safeStand = resolveCapsulePosition2D(
           physicsRef.current.x,
           physicsRef.current.z,
@@ -699,12 +525,44 @@ function FirstPersonMuseumController({
         physicsRef.current.z = safeStand.z;
       }
 
+      // Track current hall + stride-based footsteps & gentle walking head bob
+      const hallNow = getHallAtPosition(
+        physicsRef.current.x,
+        physicsRef.current.z,
+        hall2DepthExtra
+      );
+      if (hallNow !== currentHallRef.current) {
+        currentHallRef.current = hallNow;
+        onHallChange(hallNow);
+      }
+
+      if (movedStep > 0.002) {
+        strideDistRef.current += movedStep;
+        bobPhaseRef.current += movedStep * 3.1;
+        if (!reducedMotion) {
+          bobOffsetRef.current = THREE.MathUtils.damp(
+            bobOffsetRef.current,
+            Math.sin(bobPhaseRef.current) * 0.017,
+            16,
+            dt
+          );
+        } else {
+          bobOffsetRef.current = 0;
+        }
+        if (strideDistRef.current >= 0.88) {
+          strideDistRef.current = 0;
+          const floorKind = hallNow === 'hall3' || hallNow === 'hall4' ? 'marble' : 'parquet';
+          museumAcoustics.playFootstep(floorKind);
+        }
+      } else {
+        bobOffsetRef.current = THREE.MathUtils.damp(bobOffsetRef.current, 0, 10, dt);
+      }
+
       const posDamp = isReturningRef.current ? 8 : 22;
       const rotDamp = isReturningRef.current ? 8 : 26;
 
       const dampedX = THREE.MathUtils.damp(renderRef.current.x, physicsRef.current.x, posDamp, dt);
       const dampedZ = THREE.MathUtils.damp(renderRef.current.z, physicsRef.current.z, posDamp, dt);
-      // Hard invariant: clamp damped eye coordinate as well so corner smoothing never shaves walls
       const clampedRender = resolveCapsulePosition2D(dampedX, dampedZ, collisionWorld);
       renderRef.current.x = clampedRender.x;
       renderRef.current.z = clampedRender.z;
@@ -727,13 +585,20 @@ function FirstPersonMuseumController({
     }
 
     camera.rotation.order = 'YXZ';
-    camera.position.set(renderRef.current.x, PLAYER_EYE_HEIGHT, renderRef.current.z);
+    camera.position.set(
+      renderRef.current.x,
+      PLAYER_EYE_HEIGHT + bobOffsetRef.current,
+      renderRef.current.z
+    );
     camera.rotation.set(renderRef.current.pitch, renderRef.current.yaw, 0);
   });
 
   return null;
 }
 
+/**
+ * صحنه سه‌بعدی موزه خیال با ۵ تالار مجزای بوزآر پاریسی، نور طبیعی، لوستر کریستالی و مجسمه‌ها
+ */
 function MuseumSceneContent({
   slots,
   hall2DepthExtra,
@@ -741,10 +606,13 @@ function MuseumSceneContent({
   activeSlot,
   teleportRequest,
   settings,
+  reducedMotion,
+  particleScale,
   joystickRef,
   suppressClickUntilRef,
   onSelectSlot,
   onPointerLockChange,
+  onHallChange,
   onCanvasElement,
   mood,
 }: {
@@ -754,133 +622,638 @@ function MuseumSceneContent({
   activeSlot: PhotoSlot | null;
   teleportRequest: TeleportRequest;
   settings: MovementSettings;
+  reducedMotion: boolean;
+  particleScale: number;
   joystickRef: React.MutableRefObject<{ x: number; y: number }>;
   suppressClickUntilRef: React.MutableRefObject<number>;
   onSelectSlot: (slot: PhotoSlot | null) => void;
   onPointerLockChange: (locked: boolean) => void;
+  onHallChange: (hall: MuseumHallId) => void;
   onCanvasElement: (el: HTMLCanvasElement | null) => void;
   mood: GalleryMood;
 }) {
-  const floorTex = useMemo(() => createMarbleTileTexture('#242342', '#7771A8', 8), []);
+  const { gl } = useThree();
+  const maxAniso = useMemo(() => Math.min(8, gl.capabilities.getMaxAnisotropy()), [gl]);
+
+  // Rich procedural PBR textures
+  const textures = useMemo(() => {
+    const parquetH1 = createHerringboneParquetTextures(6, 5.5, maxAniso);
+    const parquetH2 = createHerringboneParquetTextures(6, 7 + Math.round(hall2DepthExtra / 3), maxAniso);
+    const parquetH5 = createHerringboneParquetTextures(4, 3.6, maxAniso);
+    const marbleH3 = createBeauxArtsMarbleTextures(5, 4.5, maxAniso);
+    const marbleH4 = createBeauxArtsMarbleTextures(6, 5, maxAniso);
+    const boiserie = createBoiserieWallTexture('#ede3d0', '#e3d5bd', '#c8a355', 4, 1, maxAniso);
+    const claretDamask = createDamaskWallTexture('#5d2028', '#46141b', '#dfd1b9', 5, 1, maxAniso);
+    const emeraldDamask = createDamaskWallTexture('#1e443d', '#15312c', '#dfd1b9', 4, 1, maxAniso);
+    const fresco = createCeilingFrescoTexture(maxAniso);
+    const clockTex = createPalaceClockTexture(maxAniso);
+    const contactTex = createContactShadowTexture();
+
+    return {
+      parquetH1,
+      parquetH2,
+      parquetH5,
+      marbleH3,
+      marbleH4,
+      boiserie,
+      claretDamask,
+      emeraldDamask,
+      fresco,
+      clockTex,
+      contactTex,
+    };
+  }, [maxAniso, hall2DepthExtra]);
 
   useEffect(() => {
     return () => {
-      floorTex.dispose();
+      textures.parquetH1.map.dispose();
+      textures.parquetH1.roughnessMap.dispose();
+      textures.parquetH2.map.dispose();
+      textures.parquetH2.roughnessMap.dispose();
+      textures.parquetH5.map.dispose();
+      textures.parquetH5.roughnessMap.dispose();
+      textures.marbleH3.map.dispose();
+      textures.marbleH3.roughnessMap.dispose();
+      textures.marbleH4.map.dispose();
+      textures.marbleH4.roughnessMap.dispose();
+      textures.boiserie.map.dispose();
+      textures.boiserie.bumpMap.dispose();
+      textures.claretDamask.dispose();
+      textures.emeraldDamask.dispose();
+      textures.fresco.dispose();
+      textures.clockTex.dispose();
+      textures.contactTex.dispose();
     };
-  }, [floorTex]);
+  }, [textures]);
 
-  const moodLight = mood === 'golden' ? '#ffdfa8' : mood === 'midnight' ? '#8c87cc' : '#F1DCCB';
-  const endWallZ = -22 - hall2DepthExtra;
-  // Exact alignment of floor & ceiling with front (Z=4.5 ± 0.175) and back (endWallZ ± 0.175) outer walls
-  const frontOuterZ = 4.675;
-  const backOuterZ = endWallZ - 0.175;
-  const totalDepth = frontOuterZ - backOuterZ;
-  const centerZ = (frontOuterZ + backOuterZ) / 2;
+  const { hall2NorthZ, hall4SouthZ, hall4NorthZ } = useMemo(
+    () => getHall4Bounds(hall2DepthExtra),
+    [hall2DepthExtra]
+  );
 
-  const columnZs = [3.5, -1.0, -5.8, -11.4, -15.6, -20.0];
-  for (let z = -24.6; z > endWallZ + 1; z -= 4.6) {
-    columnZs.push(z);
-  }
+  const hall2Length = Math.abs(hall2NorthZ - -8.5);
+  const hall2CenterZ = (-8.5 + hall2NorthZ) / 2;
+  const hall4CenterZ = (hall4SouthZ + hall4NorthZ) / 2;
+
+  // Dynamic gentle illumination shimmer across chandeliers & daylight mood
+  const keyLightRef = useRef<THREE.DirectionalLight>(null);
+  const moodConfig =
+    mood === 'golden'
+      ? {
+          ambient: 0.44,
+          sunColor: '#ffe0a8',
+          sunIntensity: 1.35,
+          skyColor: '#fff1d1',
+          windowGlow: '#ffdfb0',
+          chandelierIntensity: 3.1,
+          chandelierColor: '#ffda9b',
+        }
+      : mood === 'evening'
+        ? {
+            ambient: 0.28,
+            sunColor: '#a3b3dc',
+            sunIntensity: 0.72,
+            skyColor: '#7a8ab8',
+            windowGlow: '#43537e',
+            chandelierIntensity: 3.4,
+            chandelierColor: '#ffd996',
+          }
+        : {
+            ambient: 0.5,
+            sunColor: '#fff6e8',
+            sunIntensity: 1.18,
+            skyColor: '#f3f7ff',
+            windowGlow: '#eef4ff',
+            chandelierIntensity: 2.35,
+            chandelierColor: '#ffe6bd',
+          };
+
+  useFrame(({ clock }) => {
+    if (keyLightRef.current && !reducedMotion) {
+      const t = clock.getElapsedTime();
+      keyLightRef.current.intensity = moodConfig.sunIntensity + Math.sin(t * 0.45) * 0.04;
+    }
+  });
+
+  const hall2ColumnZs = useMemo(() => {
+    const zs = [-10.6, -16.6, -22.6];
+    for (let z = -27.4; z > hall2NorthZ + 1.2; z -= 4.8) {
+      zs.push(z);
+    }
+    return zs;
+  }, [hall2NorthZ]);
+
+  const dustCount = Math.max(24, Math.round(70 * particleScale));
 
   return (
     <>
-      <ambientLight intensity={mood === 'midnight' ? 0.3 : 0.48} color={moodLight} />
-      <hemisphereLight args={[moodLight, '#17172F', 0.65]} />
-      <directionalLight position={[4, 10, 6]} intensity={mood === 'golden' ? 1.25 : 0.95} color={moodLight} castShadow />
+      {/* 3-Point Beaux-Arts Lighting Rig (Max 6 Lights Total for High Mobile/Desktop FPS) */}
+      <ambientLight intensity={moodConfig.ambient} color={moodConfig.sunColor} />
+      <hemisphereLight args={[moodConfig.skyColor, '#3b2b20', 0.68]} />
+      <directionalLight
+        ref={keyLightRef}
+        position={[14, 18, 6]}
+        intensity={moodConfig.sunIntensity}
+        color={moodConfig.sunColor}
+        castShadow
+        shadow-mapSize={[1024, 1024]}
+        shadow-bias={-0.0004}
+        shadow-normalBias={0.02}
+        shadow-camera-left={-22}
+        shadow-camera-right={22}
+        shadow-camera-top={22}
+        shadow-camera-bottom={-32}
+        shadow-camera-far={55}
+      />
+      <directionalLight position={[-12, 10, -18]} intensity={0.42} color="#e5dcff" />
 
-      <Sparkles count={65} scale={[13.6, 5.2, totalDepth]} position={[0, 2.6, centerZ]} size={2.2} speed={0.22} color="#D6B875" />
+      {/* Subtle Floating Dust Motes in Shafts of Parisian Light */}
+      <Sparkles
+        count={dustCount}
+        scale={[15, 5.5, 13]}
+        position={[0, 3.6, -1.0]}
+        size={1.6}
+        speed={reducedMotion ? 0 : 0.14}
+        opacity={0.42}
+        color="#ffe6b5"
+      />
+      <Sparkles
+        count={Math.max(18, Math.round(50 * particleScale))}
+        scale={[12, 6, 10]}
+        position={[15.5, 4.2, -1.5]}
+        size={1.7}
+        speed={reducedMotion ? 0 : 0.16}
+        opacity={0.46}
+        color="#fff2d2"
+      />
+      <Sparkles
+        count={Math.max(18, Math.round(50 * particleScale))}
+        scale={[14, 6, 12]}
+        position={[0, 4.4, hall4CenterZ]}
+        size={1.6}
+        speed={reducedMotion ? 0 : 0.15}
+        opacity={0.44}
+        color="#fff4db"
+      />
 
-      {/* Grand Marble Floor seamlessly bounded to outer walls */}
-      <mesh
-        rotation={[-Math.PI / 2, 0, 0]}
-        position={[0, 0, centerZ]}
-        receiveShadow
-        onClick={() => {
-          if (performance.now() < suppressClickUntilRef.current) return;
-          onSelectSlot(null);
-        }}
-      >
-        <planeGeometry args={[14.35, totalDepth]} />
-        <meshStandardMaterial map={floorTex} roughness={0.28} metalness={0.12} />
-      </mesh>
-
-      {/* Ceiling & Gold Arch Beams */}
-      <mesh position={[0, 5.4, centerZ]}>
-        <boxGeometry args={[14.35, 0.25, totalDepth]} />
-        <meshStandardMaterial color="#191833" roughness={0.85} />
-      </mesh>
-      {columnZs.map((z, idx) => (
-        <mesh key={`beam-${idx}`} position={[0, 5.18, z]}>
-          <boxGeometry args={[14, 0.24, 0.28]} />
-          <meshStandardMaterial color="#D6B875" metalness={0.72} roughness={0.28} />
+      {/* ================================================================= */}
+      {/* 1. HALL 1: GRANDE GALERIE ENTRANCE (X ∈ [-8.5, 8.5], Z ∈ [-8.5, 6.5]) */}
+      {/* ================================================================= */}
+      <group>
+        {/* Herringbone Oak Parquet Floor */}
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[0, 0, -1.0]}
+          receiveShadow
+          onClick={() => {
+            if (performance.now() < suppressClickUntilRef.current) return;
+            onSelectSlot(null);
+          }}
+        >
+          <planeGeometry args={[17.2, 15.2]} />
+          <meshStandardMaterial
+            map={textures.parquetH1.map}
+            roughnessMap={textures.parquetH1.roughnessMap}
+            roughness={0.52}
+            metalness={0.05}
+          />
         </mesh>
-      ))}
 
-      {/* Left & Right Museum Walls */}
-      <mesh position={[-7.0, 2.7, centerZ]} receiveShadow>
-        <boxGeometry args={[0.35, 5.4, totalDepth]} />
-        <meshStandardMaterial color="#242242" roughness={0.82} />
-      </mesh>
-      <mesh position={[7.0, 2.7, centerZ]} receiveShadow>
-        <boxGeometry args={[0.35, 5.4, totalDepth]} />
-        <meshStandardMaterial color="#242242" roughness={0.82} />
-      </mesh>
+        {/* Painted Coffered Ceiling & Gold Ribs */}
+        <mesh position={[0, 8.4, -1.0]} rotation={[Math.PI / 2, 0, 0]}>
+          <planeGeometry args={[17.2, 15.2]} />
+          <meshStandardMaterial map={textures.fresco} roughness={0.62} />
+        </mesh>
+        {[-6.5, -1.0, 4.5].map((z, i) => (
+          <mesh key={`h1-beam-${i}`} position={[0, 8.15, z]}>
+            <boxGeometry args={[17.0, 0.42, 0.48]} />
+            <meshStandardMaterial color="#dfd1b8" roughness={0.55} />
+          </mesh>
+        ))}
 
-      {/* Front & Back End Walls */}
-      <mesh position={[0, 2.7, 4.5]} receiveShadow>
-        <boxGeometry args={[14.35, 5.4, 0.35]} />
-        <meshStandardMaterial color="#242242" roughness={0.82} />
-      </mesh>
-      <mesh position={[0, 2.7, endWallZ]} receiveShadow>
-        <boxGeometry args={[14.35, 5.4, 0.35]} />
-        <meshStandardMaterial color="#242242" roughness={0.82} />
-      </mesh>
+        {/* South Entrance Wall (Z = 6.7) + Monumental Double Oak Doors */}
+        <mesh position={[0, 4.2, 6.7]} receiveShadow>
+          <boxGeometry args={[17.4, 8.4, 0.4]} />
+          <meshStandardMaterial
+            map={textures.boiserie.map}
+            bumpMap={textures.boiserie.bumpMap}
+            bumpScale={0.04}
+            roughness={0.68}
+          />
+        </mesh>
+        <MonumentalOakDoors position={[0, 0, 6.5]} rotationY={Math.PI} />
 
-      {/* Dividing Archway between Hall 1 & Hall 2 (open 4m doorway in center) */}
-      <group position={[0, 0, -7.45]}>
-        <mesh position={[-4.5, 2.7, 0]} receiveShadow>
-          <boxGeometry args={[5.0, 5.4, 0.36]} />
-          <meshStandardMaterial color="#28264a" roughness={0.8} />
+        {/* Arched Beaux-Arts Windows flanking entrance */}
+        <ArchedBeauxArtsWindow position={[-5.3, 1.45, 6.46]} rotationY={Math.PI} width={2.3} height={4.4} skyColor={moodConfig.windowGlow} />
+        <ArchedBeauxArtsWindow position={[5.3, 1.45, 6.46]} rotationY={Math.PI} width={2.3} height={4.4} skyColor={moodConfig.windowGlow} />
+
+        {/* West Wall (Z ∈ [-8.5, 6.5] with Archway Z ∈ [-3.5, 0.5] to Hall 5) */}
+        <mesh position={[-8.7, 4.2, -6.0]} receiveShadow>
+          <boxGeometry args={[0.4, 8.4, 5.0]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.68} />
         </mesh>
-        <mesh position={[4.5, 2.7, 0]} receiveShadow>
-          <boxGeometry args={[5.0, 5.4, 0.36]} />
-          <meshStandardMaterial color="#28264a" roughness={0.8} />
+        <mesh position={[-8.7, 4.2, 3.5]} receiveShadow>
+          <boxGeometry args={[0.4, 8.4, 6.0]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.68} />
         </mesh>
-        <mesh position={[0, 4.65, 0]}>
-          <boxGeometry args={[4.2, 1.5, 0.38]} />
-          <meshStandardMaterial color="#28264a" roughness={0.8} />
+        <mesh position={[-8.7, 6.4, -1.5]}>
+          <boxGeometry args={[0.42, 4.0, 4.1]} />
+          <meshStandardMaterial color="#e5d8c1" roughness={0.6} />
         </mesh>
-        <mesh position={[0, 3.85, 0]}>
-          <boxGeometry args={[4.2, 0.14, 0.44]} />
-          <meshStandardMaterial color="#D6B875" metalness={0.8} roughness={0.25} />
+        <mesh position={[-8.48, 4.42, -1.5]}>
+          <boxGeometry args={[0.22, 0.24, 4.2]} />
+          <meshStandardMaterial color="#cfa857" metalness={0.82} roughness={0.25} />
         </mesh>
+
+        {/* East Wall (Z ∈ [-8.5, 6.5] with Archway Z ∈ [-3.8, 0.8] to Hall 3) */}
+        <mesh position={[8.7, 4.2, -6.15]} receiveShadow>
+          <boxGeometry args={[0.4, 8.4, 4.7]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.68} />
+        </mesh>
+        <mesh position={[8.7, 4.2, 3.65]} receiveShadow>
+          <boxGeometry args={[0.4, 8.4, 5.7]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.68} />
+        </mesh>
+        <mesh position={[8.7, 6.5, -1.5]}>
+          <boxGeometry args={[0.42, 3.8, 4.7]} />
+          <meshStandardMaterial color="#e5d8c1" roughness={0.6} />
+        </mesh>
+        <mesh position={[8.48, 4.62, -1.5]}>
+          <boxGeometry args={[0.22, 0.24, 4.8]} />
+          <meshStandardMaterial color="#cfa857" metalness={0.82} roughness={0.25} />
+        </mesh>
+
+        {/* North Dividing Archway Wall to Hall 2 (Z = -8.5, open X ∈ [-2.4, +2.4]) */}
+        <mesh position={[-5.45, 4.2, -8.5]} receiveShadow>
+          <boxGeometry args={[6.1, 8.4, 0.5]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.68} />
+        </mesh>
+        <mesh position={[5.45, 4.2, -8.5]} receiveShadow>
+          <boxGeometry args={[6.1, 8.4, 0.5]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.68} />
+        </mesh>
+        <mesh position={[0, 6.65, -8.5]}>
+          <boxGeometry args={[4.9, 3.5, 0.52]} />
+          <meshStandardMaterial color="#e6dac4" roughness={0.6} />
+        </mesh>
+        <mesh position={[0, 4.92, -8.5]}>
+          <boxGeometry args={[5.1, 0.24, 0.62]} />
+          <meshStandardMaterial color="#cfa857" metalness={0.84} roughness={0.24} />
+        </mesh>
+
+        {/* Hall 1 Corinthian Columns */}
+        {[-7.2, -4.4, 1.4, 4.2].map((z, i) => (
+          <React.Fragment key={`h1-col-${i}`}>
+            <CorinthianColumn position={[-7.55, 0, z]} height={7.9} />
+            <CorinthianColumn position={[7.55, 0, z]} height={7.9} />
+          </React.Fragment>
+        ))}
+
+        {/* Brass Wall Sconces, Benches, Classical Urns & Central Crystal Chandelier */}
+        <BrassWallSconce position={[-8.48, 3.2, -6.0]} rotationY={Math.PI / 2} />
+        <BrassWallSconce position={[8.48, 3.2, -6.0]} rotationY={-Math.PI / 2} />
+        <BrassWallSconce position={[-8.48, 3.2, 3.2]} rotationY={Math.PI / 2} />
+        <BrassWallSconce position={[8.48, 3.2, 3.2]} rotationY={-Math.PI / 2} />
+
+        <AntiqueMuseumBench position={[-3.95, 0, -1.0]} rotationY={Math.PI / 2} length={2.3} velvetColor="#6c1e2a" contactTex={textures.contactTex} />
+        <AntiqueMuseumBench position={[3.95, 0, -1.0]} rotationY={Math.PI / 2} length={2.3} velvetColor="#6c1e2a" contactTex={textures.contactTex} />
+        <ClassicalAmphoraUrn position={[-4.4, 0, 4.6]} contactTex={textures.contactTex} bodyColor="#27425d" />
+        <ClassicalAmphoraUrn position={[4.4, 0, 4.6]} contactTex={textures.contactTex} bodyColor="#27425d" />
+
+        <CrystalChandelier
+          position={[0, 6.85, -1.0]}
+          scale={1.35}
+          lightIntensity={moodConfig.chandelierIntensity}
+          lightColor={moodConfig.chandelierColor}
+          withRealLight
+        />
       </group>
 
-      {/* Fluted Architectural Columns */}
-      {columnZs.map((z, idx) => (
-        <React.Fragment key={`cols-${idx}`}>
-          {[-6.25, 6.25].map((x, sideIdx) => (
-            <group key={sideIdx} position={[x, 0, z]}>
-              <mesh position={[0, 2.55, 0]} castShadow>
-                <cylinderGeometry args={[0.24, 0.28, 5.1, 14]} />
-                <meshStandardMaterial color="#32305a" roughness={0.5} />
-              </mesh>
-              <mesh position={[0, 5.12, 0]}>
-                <boxGeometry args={[0.68, 0.24, 0.68]} />
-                <meshStandardMaterial color="#D6B875" metalness={0.75} roughness={0.28} />
-              </mesh>
-            </group>
-          ))}
-        </React.Fragment>
-      ))}
+      {/* ================================================================= */}
+      {/* 2. HALL 2: SALON CARRÉ PAINTING GALLERY (Z ∈ [hall2NorthZ, -8.5]) */}
+      {/* ================================================================= */}
+      <group>
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[0, 0, hall2CenterZ]}
+          receiveShadow
+          onClick={() => {
+            if (performance.now() < suppressClickUntilRef.current) return;
+            onSelectSlot(null);
+          }}
+        >
+          <planeGeometry args={[17.2, hall2Length + 0.2]} />
+          <meshStandardMaterial
+            map={textures.parquetH2.map}
+            roughnessMap={textures.parquetH2.roughnessMap}
+            roughness={0.5}
+            metalness={0.05}
+          />
+        </mesh>
 
-      {/* Central Sculptural Centerpieces */}
-      <CentralSculpture position={[0, 0, -1.6]} variant="heart" />
-      <CentralSculpture position={[0, 0, -15.6]} variant="nebula" />
+        {/* Painted Fresco & Coffered Ceiling */}
+        <mesh position={[0, 8.2, hall2CenterZ]} rotation={[Math.PI / 2, 0, 0]}>
+          <planeGeometry args={[17.2, hall2Length + 0.2]} />
+          <meshStandardMaterial map={textures.fresco} roughness={0.62} />
+        </mesh>
 
-      {/* All Photo Frames */}
+        {/* Burgundy Damask West & East Gallery Walls */}
+        <mesh position={[-8.7, 4.1, hall2CenterZ]} receiveShadow>
+          <boxGeometry args={[0.4, 8.2, hall2Length + 0.4]} />
+          <meshStandardMaterial map={textures.claretDamask} roughness={0.78} />
+        </mesh>
+        <mesh position={[8.7, 4.1, hall2CenterZ]} receiveShadow>
+          <boxGeometry args={[0.4, 8.2, hall2Length + 0.4]} />
+          <meshStandardMaterial map={textures.claretDamask} roughness={0.78} />
+        </mesh>
+
+        {/* North Dividing Archway Wall to Hall 4 (Z = hall2NorthZ, open X ∈ [-2.4, +2.4]) */}
+        <mesh position={[-5.45, 4.1, hall2NorthZ]} receiveShadow>
+          <boxGeometry args={[6.1, 8.2, 0.5]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.68} />
+        </mesh>
+        <mesh position={[5.45, 4.1, hall2NorthZ]} receiveShadow>
+          <boxGeometry args={[6.1, 8.2, 0.5]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.68} />
+        </mesh>
+        <mesh position={[0, 6.55, hall2NorthZ]}>
+          <boxGeometry args={[4.9, 3.3, 0.52]} />
+          <meshStandardMaterial color="#e6dac4" roughness={0.6} />
+        </mesh>
+        <mesh position={[0, 4.92, hall2NorthZ]}>
+          <boxGeometry args={[5.1, 0.24, 0.62]} />
+          <meshStandardMaterial color="#cfa857" metalness={0.84} roughness={0.24} />
+        </mesh>
+
+        {/* Corinthian Columns & Gilt Ceiling Beams */}
+        {hall2ColumnZs.map((z, i) => (
+          <React.Fragment key={`h2-col-${i}`}>
+            <CorinthianColumn position={[-7.55, 0, z]} height={7.7} />
+            <CorinthianColumn position={[7.55, 0, z]} height={7.7} />
+            <mesh position={[0, 7.98, z]}>
+              <boxGeometry args={[17.0, 0.36, 0.42]} />
+              <meshStandardMaterial color="#dfd1b8" roughness={0.55} />
+            </mesh>
+          </React.Fragment>
+        ))}
+
+        {/* Salon Carré Furniture, Busts, Sconces & Twin Chandeliers */}
+        <AntiqueMuseumBench position={[0, 0, -16.5]} rotationY={Math.PI / 2} length={2.5} velvetColor="#6a1e29" contactTex={textures.contactTex} />
+        <DecorativeConsoleTable position={[-5.4, 0, -9.3]} contactTex={textures.contactTex} />
+        <DecorativeConsoleTable position={[5.4, 0, -9.3]} contactTex={textures.contactTex} />
+        <MarbleBustExhibit position={[-7.2, 0, -16.6]} rotationY={Math.PI / 2} contactTex={textures.contactTex} />
+        <MarbleBustExhibit position={[7.2, 0, -16.6]} rotationY={-Math.PI / 2} contactTex={textures.contactTex} />
+
+        <BrassWallSconce position={[-8.48, 3.3, -10.8]} rotationY={Math.PI / 2} />
+        <BrassWallSconce position={[8.48, 3.3, -10.8]} rotationY={-Math.PI / 2} />
+        <BrassWallSconce position={[-8.48, 3.3, -22.2]} rotationY={Math.PI / 2} />
+        <BrassWallSconce position={[8.48, 3.3, -22.2]} rotationY={-Math.PI / 2} />
+
+        <CrystalChandelier
+          position={[0, 6.7, -13.2]}
+          scale={1.22}
+          lightIntensity={moodConfig.chandelierIntensity * 0.95}
+          lightColor={moodConfig.chandelierColor}
+          withRealLight
+        />
+        <CrystalChandelier
+          position={[0, 6.7, -20.5]}
+          scale={1.18}
+          withRealLight={false}
+        />
+      </group>
+
+      {/* ================================================================= */}
+      {/* 3. HALL 3: PETIT PALAIS SCULPTURE HALL (X ∈ [8.5, 22.5], Z ∈ [-7.5, 4.5]) */}
+      {/* ================================================================= */}
+      <group>
+        {/* Checkered Carrara & Cream Marble Floor */}
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[15.5, 0, -1.5]}
+          receiveShadow
+          onClick={() => {
+            if (performance.now() < suppressClickUntilRef.current) return;
+            onSelectSlot(null);
+          }}
+        >
+          <planeGeometry args={[14.2, 12.2]} />
+          <meshStandardMaterial
+            map={textures.marbleH3.map}
+            roughnessMap={textures.marbleH3.roughnessMap}
+            roughness={0.28}
+            metalness={0.08}
+          />
+        </mesh>
+
+        {/* High Coffered Ceiling with Central Cupola Oculus Skylight */}
+        <mesh position={[15.5, 8.8, -1.5]} rotation={[Math.PI / 2, 0, 0]}>
+          <planeGeometry args={[14.2, 12.2]} />
+          <meshStandardMaterial color="#e6dcc9" roughness={0.62} />
+        </mesh>
+        {/* Octagonal/Circular Oculus Skylight Ring */}
+        <mesh position={[15.5, 8.74, -1.5]} rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[3.1, 0.22, 12, 32]} />
+          <meshStandardMaterial color="#cfa857" metalness={0.82} roughness={0.24} />
+        </mesh>
+        <mesh position={[15.5, 8.76, -1.5]} rotation={[Math.PI / 2, 0, 0]}>
+          <circleGeometry args={[3.0, 28]} />
+          <meshStandardMaterial
+            color={moodConfig.windowGlow}
+            emissive={moodConfig.windowGlow}
+            emissiveIntensity={mood === 'evening' ? 0.45 : 1.05}
+            roughness={0.18}
+          />
+        </mesh>
+
+        {/* Outer East, North, South Limestone Boiserie Walls */}
+        <mesh position={[22.7, 4.4, -1.5]} receiveShadow>
+          <boxGeometry args={[0.4, 8.8, 12.4]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.65} />
+        </mesh>
+        <mesh position={[15.5, 4.4, -7.7]} receiveShadow>
+          <boxGeometry args={[14.4, 8.8, 0.4]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.65} />
+        </mesh>
+        <mesh position={[15.5, 4.4, 4.7]} receiveShadow>
+          <boxGeometry args={[14.4, 8.8, 0.4]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.65} />
+        </mesh>
+
+        {/* Tall Arched French Windows along East Outer Wall */}
+        <ArchedBeauxArtsWindow position={[22.46, 1.45, -4.2]} rotationY={-Math.PI / 2} width={2.4} height={4.8} skyColor={moodConfig.windowGlow} />
+        <ArchedBeauxArtsWindow position={[22.46, 1.45, 1.2]} rotationY={-Math.PI / 2} width={2.4} height={4.8} skyColor={moodConfig.windowGlow} />
+
+        {/* 4 Monumental Corinthian Columns */}
+        {[10.1, 20.9].map((cx) =>
+          [-6.0, 3.0].map((cz) => (
+            <CorinthianColumn key={`h3-col-${cx}-${cz}`} position={[cx, 0, cz]} height={8.2} />
+          ))
+        )}
+
+        {/* Central Winged Classical Marble Statue + 4 Marble Busts + Benches */}
+        <ClassicalSculptureFull position={[15.5, 0, -1.5]} contactTex={textures.contactTex} />
+        <MarbleBustExhibit position={[11.8, 0, -5.2]} rotationY={Math.PI * 0.25} contactTex={textures.contactTex} />
+        <MarbleBustExhibit position={[19.2, 0, -5.2]} rotationY={-Math.PI * 0.25} contactTex={textures.contactTex} />
+        <MarbleBustExhibit position={[11.8, 0, 2.2]} rotationY={Math.PI * 0.75} contactTex={textures.contactTex} />
+        <MarbleBustExhibit position={[19.2, 0, 2.2]} rotationY={-Math.PI * 0.75} contactTex={textures.contactTex} />
+
+        <AntiqueMuseumBench position={[15.5, 0, -5.5]} length={2.2} velvetColor="#293d54" contactTex={textures.contactTex} />
+        <AntiqueMuseumBench position={[15.5, 0, 2.5]} length={2.2} velvetColor="#293d54" contactTex={textures.contactTex} />
+
+        <pointLight position={[15.5, 7.2, -1.5]} color={moodConfig.skyColor} intensity={mood === 'evening' ? 1.8 : 2.9} distance={19} decay={1.3} />
+      </group>
+
+      {/* ================================================================= */}
+      {/* 4. HALL 4: MUSÉE D'ORSAY SKYLIGHT GALLERY (Z ∈ [hall4NorthZ, hall4SouthZ]) */}
+      {/* ================================================================= */}
+      <group>
+        {/* Polished Cream & Carrara Marble Floor */}
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[0, 0, hall4CenterZ]}
+          receiveShadow
+          onClick={() => {
+            if (performance.now() < suppressClickUntilRef.current) return;
+            onSelectSlot(null);
+          }}
+        >
+          <planeGeometry args={[17.2, 14.2]} />
+          <meshStandardMaterial
+            map={textures.marbleH4.map}
+            roughnessMap={textures.marbleH4.roughnessMap}
+            roughness={0.26}
+            metalness={0.08}
+          />
+        </mesh>
+
+        {/* West, East & North Limestone Walls */}
+        <mesh position={[-8.7, 3.8, hall4CenterZ]} receiveShadow>
+          <boxGeometry args={[0.4, 7.6, 14.4]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.62} />
+        </mesh>
+        <mesh position={[8.7, 3.8, hall4CenterZ]} receiveShadow>
+          <boxGeometry args={[0.4, 7.6, 14.4]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.62} />
+        </mesh>
+        <mesh position={[0, 4.4, hall4NorthZ - 0.2]} receiveShadow>
+          <boxGeometry args={[17.4, 8.8, 0.4]} />
+          <meshStandardMaterial map={textures.boiserie.map} bumpMap={textures.boiserie.bumpMap} bumpScale={0.04} roughness={0.62} />
+        </mesh>
+
+        {/* Musée d'Orsay Barrel-Vaulted Glass & Wrought-Iron Skylight Roof */}
+        <mesh position={[0, 7.6, hall4CenterZ]} rotation={[Math.PI / 2, 0, 0]}>
+          <cylinderGeometry args={[8.4, 8.4, 14.2, 24, 1, true, -Math.PI / 2, Math.PI]} />
+          <meshStandardMaterial
+            color={moodConfig.windowGlow}
+            emissive={moodConfig.windowGlow}
+            emissiveIntensity={mood === 'evening' ? 0.38 : 0.92}
+            roughness={0.2}
+            side={THREE.BackSide}
+          />
+        </mesh>
+        {/* Wrought-Iron & Gilt Ribbed Skylight Trusses */}
+        {[hall4SouthZ - 2.2, hall4SouthZ - 5.2, hall4SouthZ - 8.2, hall4SouthZ - 11.2].map((rz, idx) => (
+          <mesh key={`orsay-rib-${idx}`} position={[0, 7.55, rz]}>
+            <torusGeometry args={[8.2, 0.12, 8, 28, Math.PI]} />
+            <meshStandardMaterial color="#36383e" metalness={0.72} roughness={0.34} />
+          </mesh>
+        ))}
+
+        {/* Monumental Arched North Windows + Ornamental Beaux-Arts Gilded Clock (Zero Text) */}
+        <ArchedBeauxArtsWindow position={[-5.0, 1.35, hall4NorthZ + 0.04]} width={2.3} height={4.4} skyColor={moodConfig.windowGlow} />
+        <ArchedBeauxArtsWindow position={[5.0, 1.35, hall4NorthZ + 0.04]} width={2.3} height={4.4} skyColor={moodConfig.windowGlow} />
+        <group position={[0, 5.2, hall4NorthZ + 0.08]}>
+          <mesh>
+            <cylinderGeometry args={[1.28, 1.28, 0.14, 28]} />
+            <meshStandardMaterial color="#cfa857" metalness={0.88} roughness={0.22} />
+          </mesh>
+          <mesh position={[0, 0, 0.08]} rotation={[Math.PI / 2, 0, 0]}>
+            <circleGeometry args={[1.15, 28]} />
+            <meshStandardMaterial map={textures.clockTex} roughness={0.35} />
+          </mesh>
+        </group>
+
+        {/* Columns, Urns, Central Bench & Daylight */}
+        {[hall4SouthZ - 3.2, hall4SouthZ - 10.6].map((cz, i) => (
+          <React.Fragment key={`h4-col-${i}`}>
+            <CorinthianColumn position={[-7.55, 0, cz]} height={7.1} />
+            <CorinthianColumn position={[7.55, 0, cz]} height={7.1} />
+          </React.Fragment>
+        ))}
+        <ClassicalAmphoraUrn position={[-4.6, 0, hall4NorthZ + 1.35]} contactTex={textures.contactTex} bodyColor="#c6bfb2" />
+        <ClassicalAmphoraUrn position={[4.6, 0, hall4NorthZ + 1.35]} contactTex={textures.contactTex} bodyColor="#c6bfb2" />
+        <AntiqueMuseumBench position={[0, 0, hall4SouthZ - 7.0]} length={2.5} velvetColor="#293d54" contactTex={textures.contactTex} />
+
+        <pointLight position={[0, 7.2, hall4CenterZ]} color={moodConfig.skyColor} intensity={mood === 'evening' ? 1.7 : 2.75} distance={20} decay={1.3} />
+      </group>
+
+      {/* ================================================================= */}
+      {/* 5. HALL 5: INTIMATE SELECTED WORKS CABINET (X ∈ [-18.5, -8.5], Z ∈ [-6.5, 2.5]) */}
+      {/* ================================================================= */}
+      <group>
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[-13.5, 0, -2.0]}
+          receiveShadow
+          onClick={() => {
+            if (performance.now() < suppressClickUntilRef.current) return;
+            onSelectSlot(null);
+          }}
+        >
+          <planeGeometry args={[10.2, 9.2]} />
+          <meshStandardMaterial
+            map={textures.parquetH5.map}
+            roughnessMap={textures.parquetH5.roughnessMap}
+            roughness={0.48}
+            metalness={0.05}
+          />
+        </mesh>
+
+        {/* Coffered Plaster Ceiling */}
+        <mesh position={[-13.5, 6.4, -2.0]} rotation={[Math.PI / 2, 0, 0]}>
+          <planeGeometry args={[10.2, 9.2]} />
+          <meshStandardMaterial map={textures.fresco} roughness={0.62} />
+        </mesh>
+
+        {/* Deep Parisian Emerald Damask Walls */}
+        <mesh position={[-18.7, 3.2, -2.0]} receiveShadow>
+          <boxGeometry args={[0.4, 6.4, 9.4]} />
+          <meshStandardMaterial map={textures.emeraldDamask} roughness={0.78} />
+        </mesh>
+        <mesh position={[-13.5, 3.2, -6.7]} receiveShadow>
+          <boxGeometry args={[10.4, 6.4, 0.4]} />
+          <meshStandardMaterial map={textures.emeraldDamask} roughness={0.78} />
+        </mesh>
+        <mesh position={[-13.5, 3.2, 2.7]} receiveShadow>
+          <boxGeometry args={[10.4, 6.4, 0.4]} />
+          <meshStandardMaterial map={textures.emeraldDamask} roughness={0.78} />
+        </mesh>
+
+        <ArchedBeauxArtsWindow position={[-13.5, 1.2, 2.46]} rotationY={Math.PI} width={2.2} height={4.0} skyColor={moodConfig.windowGlow} />
+
+        <DecorativeConsoleTable position={[-13.5, 0, -5.9]} contactTex={textures.contactTex} />
+        <AntiqueMuseumBench position={[-13.4, 0, -2.0]} rotationY={Math.PI / 2} length={2.1} velvetColor="#1d443c" contactTex={textures.contactTex} />
+        <ClassicalAmphoraUrn position={[-17.3, 0, -5.3]} contactTex={textures.contactTex} bodyColor="#1e443d" />
+        <ClassicalAmphoraUrn position={[-17.3, 0, 1.3]} contactTex={textures.contactTex} bodyColor="#1e443d" />
+
+        <BrassWallSconce position={[-18.48, 3.0, -4.6]} rotationY={Math.PI / 2} />
+        <BrassWallSconce position={[-18.48, 3.0, 0.6]} rotationY={Math.PI / 2} />
+
+        <CrystalChandelier
+          position={[-13.5, 5.1, -2.0]}
+          scale={0.95}
+          lightIntensity={moodConfig.chandelierIntensity * 0.85}
+          lightColor={moodConfig.chandelierColor}
+          withRealLight
+        />
+      </group>
+
+      {/* ================================================================= */}
+      {/* USER ARTWORKS (Sculpted 3D Museum Frames, Uncropped & Zero Text)  */}
+      {/* ================================================================= */}
       {slots.map((slot) => (
-        <PhotoFrame3D
+        <OrnatePhotoFrame3D
           key={slot.index}
           slot={slot}
           active={activeSlot?.index === slot.index}
@@ -889,14 +1262,58 @@ function MuseumSceneContent({
         />
       ))}
 
+      {/* ================================================================= */}
+      {/* CALM DISTANT MUSEUM VISITORS (Quiet Parisian Atmosphere)          */}
+      {/* ================================================================= */}
+      {!reducedMotion && (
+        <>
+          <AmbientVisitorNPC
+            coatColor="#333847"
+            speed={0.55}
+            phaseOffset={0}
+            waypoints={[
+              [-1.8, 0, -11.5],
+              [1.8, 0, -11.5],
+              [2.2, 0, -20.5],
+              [-2.2, 0, -20.5],
+            ]}
+          />
+          <AmbientVisitorNPC
+            coatColor="#574740"
+            speed={0.48}
+            phaseOffset={6.5}
+            waypoints={[
+              [12.4, 0, -3.2],
+              [18.6, 0, -3.2],
+              [18.6, 0, 0.4],
+              [12.4, 0, 0.4],
+            ]}
+          />
+          <AmbientVisitorNPC
+            coatColor="#3f343c"
+            speed={0.5}
+            phaseOffset={3.2}
+            waypoints={[
+              [-3.0, 0, hall4SouthZ - 4.0],
+              [3.0, 0, hall4SouthZ - 4.0],
+              [3.0, 0, hall4NorthZ + 3.2],
+              [-3.0, 0, hall4NorthZ + 3.2],
+            ]}
+          />
+        </>
+      )}
+
       <FirstPersonMuseumController
         collisionWorld={collisionWorld}
+        hall2DepthExtra={hall2DepthExtra}
         activeSlot={activeSlot}
         teleportRequest={teleportRequest}
         settings={settings}
+        reducedMotion={reducedMotion}
         joystickRef={joystickRef}
         suppressClickUntilRef={suppressClickUntilRef}
         onPointerLockChange={onPointerLockChange}
+        onHallChange={onHallChange}
         onCanvasElement={onCanvasElement}
       />
     </>
@@ -932,7 +1349,7 @@ function VirtualJoystick({
     setKnobOffset({ x: dx, y: dy });
 
     const normX = dx / maxRadius;
-    const normY = -dy / maxRadius; // Pushing upward = +Y forward
+    const normY = -dy / maxRadius;
     const mag = Math.hypot(normX, normY);
     if (mag < 0.08) {
       joystickRef.current = { x: 0, y: 0 };
@@ -949,7 +1366,7 @@ function VirtualJoystick({
 
   return (
     <div
-      className={`fixed left-4 ${bottomClass} z-20 w-24 h-24 rounded-full bg-[#17172F]/70 border border-[#D6B875]/45 backdrop-blur-sm flex items-center justify-center touch-none select-none shadow-xl transition-all`}
+      className={`fixed left-4 ${bottomClass} z-20 w-24 h-24 rounded-full bg-[#17172F]/82 border border-[#D6B875]/55 flex items-center justify-center touch-none select-none shadow-xl transition-all`}
       onPointerDown={(e) => {
         e.stopPropagation();
         e.currentTarget.setPointerCapture(e.pointerId);
@@ -978,7 +1395,7 @@ function VirtualJoystick({
       }}
       aria-label="اهرم حرکت در موزه"
     >
-      <div className="absolute inset-2.5 rounded-full border border-dashed border-[#7771A8]/45 pointer-events-none" />
+      <div className="absolute inset-2.5 rounded-full border border-dashed border-[#D6B875]/35 pointer-events-none" />
       <div
         className="w-9 h-9 rounded-full bg-gradient-to-br from-[#F1DCCB] to-[#D6B875] border border-[#17172F]/60 shadow-md pointer-events-none"
         style={{
@@ -993,10 +1410,20 @@ export const MuseumWorld: React.FC = () => {
   const { slots, hall2DepthExtra } = useMemo(() => buildGalleryLayout(photoFiles), []);
   const collisionWorld = useMemo(() => buildMuseumCollisionWorld(hall2DepthExtra), [hall2DepthExtra]);
 
+  const quality = useUniverseStore((s) => s.environment.quality);
+  const reducedMotion = useUniverseStore((s) => s.environment.reducedMotion);
+  const audioMuted = useUniverseStore((s) => s.audio.muted);
+  const audioVolume = useUniverseStore((s) => s.audio.volume);
+
+  const profile = useMemo(
+    () => getGraphicsProfile(quality, reducedMotion),
+    [quality, reducedMotion]
+  );
+
   const [activeSlot, setActiveSlot] = useState<PhotoSlot | null>(null);
-  const [hallTarget, setHallTarget] = useState<'hall1' | 'hall2'>('hall1');
-  const [teleportRequest, setTeleportRequest] = useState<TeleportRequest>({ target: 'start', seq: 0 });
-  const [mood, setMood] = useState<GalleryMood>('gallery');
+  const [currentHall, setCurrentHall] = useState<MuseumHallId>('hall1');
+  const [teleportRequest, setTeleportRequest] = useState<TeleportRequest>({ target: 'hall1', seq: 0 });
+  const [mood, setMood] = useState<GalleryMood>('daylight');
   const [dockOpen, setDockOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pointerLocked, setPointerLocked] = useState(false);
@@ -1011,6 +1438,25 @@ export const MuseumWorld: React.FC = () => {
   const joystickRef = useRef({ x: 0, y: 0 });
   const suppressClickUntilRef = useRef(0);
   const canvasElementRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Start & cleanup quiet Parisian museum hall acoustic tone
+  useEffect(() => {
+    const startAudio = () => {
+      museumAcoustics.startAmbientHallTone();
+    };
+    startAudio();
+    window.addEventListener('pointerdown', startAudio, { once: true });
+    window.addEventListener('keydown', startAudio, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', startAudio);
+      window.removeEventListener('keydown', startAudio);
+      museumAcoustics.stopAmbientHallTone();
+    };
+  }, []);
+
+  useEffect(() => {
+    museumAcoustics.syncGlobalVolume();
+  }, [audioMuted, audioVolume]);
 
   const handleCanvasElement = useCallback((el: HTMLCanvasElement | null) => {
     canvasElementRef.current = el;
@@ -1031,18 +1477,17 @@ export const MuseumWorld: React.FC = () => {
       const maybePromise = el.requestPointerLock?.() as unknown as Promise<void> | undefined;
       if (maybePromise && typeof maybePromise.catch === 'function') {
         maybePromise.catch(() => {
-          // Fallback mouse-drag look remains active automatically
+          // Drag look remains active cleanly
         });
       }
     } catch {
-      // Fallback mouse-drag look remains active automatically
+      // Drag look remains active cleanly
     }
   };
 
-  const triggerTeleport = (target: 'start' | 'hall1' | 'hall2') => {
+  const triggerTeleport = (target: MuseumHallId) => {
     setActiveSlot(null);
-    if (target === 'hall1' || target === 'start') setHallTarget('hall1');
-    else setHallTarget('hall2');
+    setCurrentHall(target);
     setTeleportRequest((prev) => ({ target, seq: prev.seq + 1 }));
   };
 
@@ -1058,7 +1503,6 @@ export const MuseumWorld: React.FC = () => {
     setActiveSlot(slots[nextIdx]);
   }, [activeSlot, slots]);
 
-  // Keyboard navigation in lightbox
   useEffect(() => {
     if (!activeSlot) return;
     const onKey = (e: KeyboardEvent) => {
@@ -1070,12 +1514,19 @@ export const MuseumWorld: React.FC = () => {
     return () => window.removeEventListener('keydown', onKey);
   }, [activeSlot, goPrevPhoto, goNextPhoto]);
 
+  const activeHallLabel = MUSEUM_HALL_SPAWNS[currentHall]?.label ?? 'تالار بزرگ فرانسوی';
+
+  const bgColor =
+    mood === 'evening' ? '#161a2b' : mood === 'golden' ? '#362b22' : '#303442';
+
   return (
     <div className="relative w-full h-full select-none">
       <SceneCanvas
         cameraPosition={[MUSEUM_START_POS.x, PLAYER_EYE_HEIGHT, MUSEUM_START_POS.z]}
         fov={52}
-        bgColor={mood === 'midnight' ? '#101024' : '#17172F'}
+        bgColor={bgColor}
+        fogNear={22}
+        fogFar={78}
       >
         <MuseumSceneContent
           slots={slots}
@@ -1084,33 +1535,40 @@ export const MuseumWorld: React.FC = () => {
           activeSlot={activeSlot}
           teleportRequest={teleportRequest}
           settings={settings}
+          reducedMotion={profile.systemReducedMotion}
+          particleScale={profile.particleScale}
           joystickRef={joystickRef}
           suppressClickUntilRef={suppressClickUntilRef}
           onSelectSlot={setActiveSlot}
           onPointerLockChange={setPointerLocked}
+          onHallChange={setCurrentHall}
           onCanvasElement={handleCanvasElement}
           mood={mood}
         />
       </SceneCanvas>
 
-      {/* Subtle centered dot only while mouse-look pointer lock is active */}
+      {/* Subtle centered dot only while pointer lock is active */}
       {pointerLocked && !activeSlot && (
         <div className="fixed inset-0 z-10 pointer-events-none flex items-center justify-center">
-          <div className="w-2 h-2 rounded-full bg-[#D6B875]/85 ring-2 ring-[#17172F]/70" />
+          <div className="w-2 h-2 rounded-full bg-[#D6B875]/90 ring-2 ring-[#17172F]/75" />
         </div>
       )}
 
-      {/* Top-Left Compact Movement Toolbar & Settings Popover */}
+      {/* Top-Left Compact Toolbar + Active Hall Indicator */}
       {!activeSlot && (
         <div className="fixed top-16 left-3 sm:left-5 z-20 flex flex-col items-end gap-2 pointer-events-none">
-          <div className="flex items-center gap-1.5 pointer-events-auto">
+          <div className="flex flex-wrap items-center justify-end gap-1.5 pointer-events-auto">
+            <div className="px-3 py-1.5 rounded-xl bg-[#17172F]/92 border border-[#D6B875]/35 text-[#F1DCCB] text-xs font-medium">
+              {activeHallLabel}
+            </div>
+
             <button
               type="button"
               onClick={requestWalkLock}
               className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs border transition-colors cursor-pointer ${
                 pointerLocked
                   ? 'bg-[#D6B875] text-[#17172F] border-[#D6B875] font-bold'
-                  : 'bg-[#17172F]/90 text-[#F1DCCB] border-[#7771A8]/45 hover:border-[#D6B875]'
+                  : 'bg-[#17172F]/92 text-[#F1DCCB] border-[#7771A8]/45 hover:border-[#D6B875]'
               }`}
             >
               <Crosshair className="w-3.5 h-3.5" />
@@ -1123,7 +1581,7 @@ export const MuseumWorld: React.FC = () => {
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs border transition-colors cursor-pointer ${
                 settingsOpen
                   ? 'bg-[#7771A8] text-[#F1DCCB] border-[#D6B875]'
-                  : 'bg-[#17172F]/90 text-[#F1DCCB] border-[#7771A8]/45 hover:border-[#D6B875]'
+                  : 'bg-[#17172F]/92 text-[#F1DCCB] border-[#7771A8]/45 hover:border-[#D6B875]'
               }`}
             >
               <SlidersHorizontal className="w-3.5 h-3.5 text-[#D6B875]" />
@@ -1132,7 +1590,7 @@ export const MuseumWorld: React.FC = () => {
           </div>
 
           {settingsOpen && (
-            <div className="pointer-events-auto w-72 rounded-2xl bg-[#17172F]/95 border border-[#D6B875]/40 p-3.5 shadow-2xl space-y-3 text-right">
+            <div className="pointer-events-auto w-72 rounded-2xl bg-[#17172F]/96 border border-[#D6B875]/45 p-3.5 shadow-2xl space-y-3 text-right">
               <div className="flex items-center justify-between border-b border-[#7771A8]/25 pb-2">
                 <span className="text-xs font-bold text-[#F1DCCB]">تنظیمات حرکت و دوربین</span>
                 <button
@@ -1206,7 +1664,7 @@ export const MuseumWorld: React.FC = () => {
               <div className="grid grid-cols-2 gap-1.5 pt-1">
                 <button
                   type="button"
-                  onClick={() => triggerTeleport('start')}
+                  onClick={() => triggerTeleport('hall1')}
                   className="py-1.5 px-2 rounded-xl bg-[#232347] border border-[#7771A8]/40 text-[11px] text-[#F1DCCB] hover:border-[#D6B875] flex items-center justify-center gap-1 cursor-pointer"
                 >
                   <RotateCcw className="w-3 h-3 text-[#D6B875]" />
@@ -1226,25 +1684,25 @@ export const MuseumWorld: React.FC = () => {
         </div>
       )}
 
-      {/* Mobile Touch Virtual Joystick (bottom-left; auto-hidden when photo modal is open) */}
+      {/* Mobile Touch Virtual Joystick */}
       {settings.touchControls && !activeSlot && (
         <VirtualJoystick
           joystickRef={joystickRef}
-          bottomClass={dockOpen ? 'bottom-36 sm:bottom-24' : 'bottom-12'}
+          bottomClass={dockOpen ? 'bottom-40 sm:bottom-28' : 'bottom-12'}
         />
       )}
 
       {/* Pure Image Lightbox Modal — ZERO text metadata / titles / captions / filenames */}
       {activeSlot && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-[#0d0d1d]/92 p-4 sm:p-8"
+          className="fixed inset-0 z-40 flex items-center justify-center bg-[#0d0d1d]/94 p-4 sm:p-8"
           onClick={() => setActiveSlot(null)}
         >
           <button
             type="button"
             onClick={() => setActiveSlot(null)}
             aria-label="بستن"
-            className="fixed top-4 left-4 sm:top-6 sm:left-6 z-50 w-11 h-11 rounded-2xl bg-[#17172F]/90 border border-[#D6B875]/45 text-[#F1DCCB] hover:border-[#D6B875] flex items-center justify-center shadow-lg cursor-pointer"
+            className="fixed top-4 left-4 sm:top-6 sm:left-6 z-50 w-11 h-11 rounded-2xl bg-[#17172F]/95 border border-[#D6B875]/45 text-[#F1DCCB] hover:border-[#D6B875] flex items-center justify-center shadow-lg cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -1257,14 +1715,14 @@ export const MuseumWorld: React.FC = () => {
                 goPrevPhoto();
               }}
               aria-label="قبلی"
-              className="fixed right-3 sm:right-6 top-1/2 -translate-y-1/2 z-50 w-11 h-11 rounded-2xl bg-[#17172F]/90 border border-[#7771A8]/50 text-[#F1DCCB] hover:border-[#D6B875] flex items-center justify-center shadow-lg cursor-pointer"
+              className="fixed right-3 sm:right-6 top-1/2 -translate-y-1/2 z-50 w-11 h-11 rounded-2xl bg-[#17172F]/95 border border-[#7771A8]/50 text-[#F1DCCB] hover:border-[#D6B875] flex items-center justify-center shadow-lg cursor-pointer"
             >
               <ChevronRight className="w-6 h-6" />
             </button>
           )}
 
           <div
-            className="relative max-w-[90vw] max-h-[84vh] rounded-2xl p-2 sm:p-3 bg-gradient-to-br from-[#D6B875]/35 via-[#242345] to-[#D9A9C5]/30 border border-[#D6B875]/55 shadow-2xl"
+            className="relative max-w-[90vw] max-h-[84vh] rounded-2xl p-2 sm:p-3 bg-gradient-to-br from-[#D6B875]/40 via-[#242345] to-[#D9A9C5]/30 border border-[#D6B875]/55 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <img
@@ -1282,7 +1740,7 @@ export const MuseumWorld: React.FC = () => {
                 goNextPhoto();
               }}
               aria-label="بعدی"
-              className="fixed left-3 sm:left-6 top-1/2 -translate-y-1/2 z-50 w-11 h-11 rounded-2xl bg-[#17172F]/90 border border-[#7771A8]/50 text-[#F1DCCB] hover:border-[#D6B875] flex items-center justify-center shadow-lg cursor-pointer"
+              className="fixed left-3 sm:left-6 top-1/2 -translate-y-1/2 z-50 w-11 h-11 rounded-2xl bg-[#17172F]/95 border border-[#7771A8]/50 text-[#F1DCCB] hover:border-[#D6B875] flex items-center justify-center shadow-lg cursor-pointer"
             >
               <ChevronLeft className="w-6 h-6" />
             </button>
@@ -1290,55 +1748,47 @@ export const MuseumWorld: React.FC = () => {
         </div>
       )}
 
-      {/* Collapsible Bottom Control Dock (Halls & Lighting Only, Zero Photo Metadata) */}
+      {/* Collapsible Bottom Control Dock (5 French Halls & Lighting Moods, Zero Photo Text) */}
       <div className="fixed bottom-3 inset-x-0 z-20 flex flex-col items-center px-3 pointer-events-none">
         <button
           type="button"
           onClick={() => setDockOpen((v) => !v)}
-          className="pointer-events-auto mb-1.5 px-3.5 py-1 rounded-t-xl bg-[#17172F]/90 border border-b-0 border-[#7771A8]/40 text-[11px] text-[#F1DCCB] cursor-pointer"
+          className="pointer-events-auto mb-1.5 px-3.5 py-1 rounded-t-xl bg-[#17172F]/92 border border-b-0 border-[#7771A8]/45 text-[11px] text-[#F1DCCB] cursor-pointer"
         >
           {dockOpen ? 'جمع کردن راهنمای موزه' : 'نمایش تالارها و نورپردازی'}
         </button>
 
         {dockOpen && (
-          <div className="pointer-events-auto w-full max-w-2xl rounded-2xl bg-[#17172F]/92 border border-[#7771A8]/40 p-3 shadow-2xl space-y-2.5">
+          <div className="pointer-events-auto w-full max-w-4xl rounded-2xl bg-[#17172F]/94 border border-[#7771A8]/45 p-3 shadow-2xl space-y-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-xs text-[#D6B875] flex items-center gap-1 ml-1">
                   <Compass className="w-3.5 h-3.5" />
                   تالارها:
                 </span>
-                <button
-                  type="button"
-                  onClick={() => triggerTeleport('hall1')}
-                  className={`px-3 py-1.5 rounded-xl text-xs cursor-pointer ${
-                    hallTarget === 'hall1'
-                      ? 'bg-[#7771A8] text-[#F1DCCB] font-semibold'
-                      : 'bg-[#222245] text-[#D9A9C5]'
-                  }`}
-                >
-                  تالار طلایی
-                </button>
-                <button
-                  type="button"
-                  onClick={() => triggerTeleport('hall2')}
-                  className={`px-3 py-1.5 rounded-xl text-xs cursor-pointer ${
-                    hallTarget === 'hall2'
-                      ? 'bg-[#7771A8] text-[#F1DCCB] font-semibold'
-                      : 'bg-[#222245] text-[#D9A9C5]'
-                  }`}
-                >
-                  رواق مهتاب
-                </button>
+                {HALL_TABS.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => triggerTeleport(tab.id)}
+                    className={`px-2.5 py-1.5 rounded-xl text-xs whitespace-nowrap cursor-pointer ${
+                      currentHall === tab.id
+                        ? 'bg-[#7771A8] text-[#F1DCCB] font-semibold border border-[#D6B875]/60'
+                        : 'bg-[#222245] text-[#D9A9C5] hover:bg-[#2a2a55]'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
               </div>
 
               <div className="flex items-center gap-1.5">
                 <Sun className="w-3.5 h-3.5 text-[#D6B875]" />
                 {(
                   [
-                    ['gallery', 'کلاسیک'],
+                    ['daylight', 'نور روز'],
                     ['golden', 'طلایی'],
-                    ['midnight', 'مهتابی'],
+                    ['evening', 'شامگاهی'],
                   ] as [GalleryMood, string][]
                 ).map(([m, label]) => (
                   <button
@@ -1356,7 +1806,7 @@ export const MuseumWorld: React.FC = () => {
             </div>
 
             <div className="text-[11px] text-[#A6BBAA] text-center border-t border-[#7771A8]/25 pt-1.5">
-              با کلیدهای صفحه‌کلید یا اهرم لمسی قدم بزن، با کشیدن صفحه اطراف را ببین و برای بزرگ‌نمایی روی قاب‌ها کلیک کن.
+              در پنج تالار پاریسی قدم بزن، با کشیدن صفحه اطراف را ببین و برای تماشای نزدیک روی هر قاب عکس کلیک کن.
             </div>
           </div>
         )}

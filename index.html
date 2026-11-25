@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>جهان کوچولوی ما</title>
+    <meta name="description" content="یک دنیای فانتزی سه‌بعدی، تعاملی و عاشقانه که فقط برای تو ساخته شده است." />
+    <meta property="og:title" content="جهان کوچولوی ما" />
+    <meta property="og:description" content="یک دنیای فانتزی سه‌بعدی، تعاملی و عاشقانه که فقط برای تو ساخته شده است." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#17172F" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+    <script>
+      (function () {
+        var redirect = sessionStorage.getItem('olu_redirect');
+        if (redirect) {
+          sessionStorage.removeItem('olu_redirect');
+          history.replaceState(null, '', redirect);
+        }
+      })();
+    </script>
+  </head>
+  <body class="bg-[#17172F] text-[#F1DCCB] antialiased selection:bg-[#D9A9C5]/30 selection:text-[#F1DCCB] overflow-hidden">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
